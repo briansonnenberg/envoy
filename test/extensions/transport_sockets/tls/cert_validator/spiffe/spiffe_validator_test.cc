@@ -3,9 +3,11 @@
 #include <regex>
 #include <string>
 #include <vector>
+#include <fstream>
 
 #include "envoy/common/exception.h"
 
+#include "source/common/common/fmt.h"
 #include "source/common/common/c_smart_ptr.h"
 #include "source/common/event/real_time_system.h"
 #include "source/common/tls/stats.h"
@@ -18,6 +20,8 @@
 #include "test/test_common/simulated_time_system.h"
 #include "test/test_common/test_runtime.h"
 #include "test/test_common/utility.h"
+
+#include "include/nlohmann/json.hpp"
 
 #include "gtest/gtest.h"
 #include "openssl/ssl.h"
@@ -55,6 +59,29 @@ public:
     // Initialize SPIFFEValidator with mocked context and stats
     validator_ = std::make_unique<SPIFFEValidator>(config_.get(), stats_, factory_context_);
   }
+
+  std::string compactJson(const std::string& json_string) {
+    try {
+      nlohmann::json j = nlohmann::json::parse(json_string);
+
+      return j.dump();
+    } catch (const nlohmann::json::parse_error& e) {
+      std::cerr << "Error parsing JSON: " << e.what() << std::endl;
+      return "";
+    }
+  }
+
+  std::string escapeJson(const std::string& input) {
+    std::ostringstream ss;
+    for (char c : input) {
+        switch (c) {
+            case '\\': ss << "\\\\"; break;
+            case '"': ss << "\\\""; break;
+            default: ss << c; break;
+        }
+    }
+    return ss.str();
+}
 
   void initialize(std::string yaml) {
     envoy::config::core::v3::TypedExtensionConfig typed_conf;
@@ -107,10 +134,10 @@ public:
     }
   };
 
-private:
   NiceMock<Server::Configuration::MockServerFactoryContext> factory_context_;
   NiceMock<Envoy::Event::MockDispatcher> dispatcher_;
-  //Envoy::Filesystem::MockWatcher* watcher_;
+
+private:
   bool allow_expired_certificate_{false};
   TestCertificateValidationContextConfigPtr config_;
   std::vector<envoy::extensions::transport_sockets::tls::v3::SubjectAltNameMatcher> san_matchers_{};
@@ -651,9 +678,9 @@ typed_config:
         filename: "{{ test_rundir }}/test/common/tls/test_data/intermediate_ca_cert.pem"
   )EOF"),
              time_system);
-  EXPECT_EQ(20742, validator().daysUntilFirstCertExpires().value());
+  EXPECT_EQ(20747, validator().daysUntilFirstCertExpires().value());
   time_system.setSystemTime(std::chrono::milliseconds(864000000));
-  EXPECT_EQ(20732, validator().daysUntilFirstCertExpires().value());
+  EXPECT_EQ(20737, validator().daysUntilFirstCertExpires().value());
 }
 
 TEST_F(TestSPIFFEValidator, TestDaysUntilFirstCertExpiresExpired) {
@@ -740,6 +767,79 @@ typed_config:
   validator().updateDigestForSessionId(md, hash_buffer, SHA256_DIGEST_LENGTH);
 }
 
+TEST_F(TestSPIFFEValidator, TestDoVerifyCertChainMultipleTrustDomainBundleMappingInline) {
+  auto trust_bundle_path = TestEnvironment::substitute("{{ test_rundir }}/test/common/tls/test_data/trust_bundles.json");
+  auto trust_bundle_str = escapeJson(compactJson(TestEnvironment::readFileToStringForTest(trust_bundle_path)));
+
+  auto config_str = fmt::format(R"EOF(
+name: envoy.tls.cert_validator.spiffe
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.SPIFFECertValidatorConfig
+  trust_bundles:
+    inline_string: "{}"
+  )EOF", trust_bundle_str);
+  std::cerr << "YAML Configuration:\n" << config_str << std::endl; // Print for inspection
+
+  initialize(config_str);
+
+  X509StorePtr store = X509_STORE_new();
+  SSLContextPtr ssl_ctx = SSL_CTX_new(TLS_method());
+  TestSslExtendedSocketInfo info;
+  {
+    // Trust domain matches so should be accepted.
+    auto cert = readCertFromFile(TestEnvironment::substitute(
+        "{{ test_rundir }}/test/common/tls/test_data/san_uri_cert.pem"));
+    bssl::UniquePtr<STACK_OF(X509)> cert_chain(sk_X509_new_null());
+    sk_X509_push(cert_chain.get(), cert.release());
+    EXPECT_EQ(ValidationResults::ValidationStatus::Successful,
+              validator()
+                  .doVerifyCertChain(*cert_chain, info.createValidateResultCallback(),
+                                     /*transport_socket_options=*/nullptr, *ssl_ctx, {}, false, "")
+                  .status);
+  }
+
+  {
+    auto cert = readCertFromFile(TestEnvironment::substitute(
+        "{{ test_rundir }}/test/common/tls/test_data/spiffe_san_cert.pem"));
+    bssl::UniquePtr<STACK_OF(X509)> cert_chain(sk_X509_new_null());
+    sk_X509_push(cert_chain.get(), cert.release());
+    EXPECT_EQ(ValidationResults::ValidationStatus::Successful,
+              validator()
+                  .doVerifyCertChain(*cert_chain, info.createValidateResultCallback(),
+                                     /*transport_socket_options=*/nullptr, *ssl_ctx, {}, false, "")
+                  .status);
+  }
+
+  {
+    // Trust domain matches but it has expired.
+    auto cert = readCertFromFile(
+        TestEnvironment::substitute("{{ test_rundir "
+                                    "}}/test/common/tls/test_data/expired_spiffe_san_cert.pem"));
+    bssl::UniquePtr<STACK_OF(X509)> cert_chain(sk_X509_new_null());
+    sk_X509_push(cert_chain.get(), cert.release());
+    EXPECT_EQ(ValidationResults::ValidationStatus::Failed,
+              validator()
+                  .doVerifyCertChain(*cert_chain, info.createValidateResultCallback(),
+                                     /*transport_socket_options=*/nullptr, *ssl_ctx, {}, false, "")
+                  .status);
+  }
+
+  {
+    // Does not have san.
+    auto cert = readCertFromFile(TestEnvironment::substitute(
+        "{{ test_rundir }}/test/common/tls/test_data/extensions_cert.pem"));
+    bssl::UniquePtr<STACK_OF(X509)> cert_chain(sk_X509_new_null());
+    sk_X509_push(cert_chain.get(), cert.release());
+    EXPECT_EQ(ValidationResults::ValidationStatus::Failed,
+              validator()
+                  .doVerifyCertChain(*cert_chain, info.createValidateResultCallback(),
+                                     /*transport_socket_options=*/nullptr, *ssl_ctx, {}, false, "")
+                  .status);
+  }
+
+  EXPECT_EQ(2, stats().fail_verify_error_.value());
+}
+
 TEST_F(TestSPIFFEValidator, TestDoVerifyCertChainMultipleTrustDomainBundleMapping) {
   initialize(TestEnvironment::substitute(R"EOF(
 name: envoy.tls.cert_validator.spiffe
@@ -752,12 +852,6 @@ typed_config:
   X509StorePtr store = X509_STORE_new();
   SSLContextPtr ssl_ctx = SSL_CTX_new(TLS_method());
   TestSslExtendedSocketInfo info;
-
-  // Set up expectations for onChanged to simulate file modification events
-  //EXPECT_CALL(mock_watcher, onChanged(Filesystem::Watcher::Events::Modified))
-  //    .Times(testing::AtLeast(1)) // Expect one or more calls
-  //    .WillRepeatedly(testing::Return(absl::OkStatus()));
-
   {
     // Trust domain matches so should be accepted.
     auto cert = readCertFromFile(TestEnvironment::substitute(
