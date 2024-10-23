@@ -1,14 +1,14 @@
 #include <cstdint>
+#include <fstream>
 #include <memory>
 #include <regex>
 #include <string>
 #include <vector>
-#include <fstream>
 
 #include "envoy/common/exception.h"
 
-#include "source/common/common/fmt.h"
 #include "source/common/common/c_smart_ptr.h"
+#include "source/common/common/fmt.h"
 #include "source/common/event/real_time_system.h"
 #include "source/common/tls/stats.h"
 #include "source/extensions/transport_sockets/tls/cert_validator/spiffe/spiffe_validator.h"
@@ -21,9 +21,8 @@
 #include "test/test_common/test_runtime.h"
 #include "test/test_common/utility.h"
 
-#include "include/nlohmann/json.hpp"
-
 #include "gtest/gtest.h"
+#include "include/nlohmann/json.hpp"
 #include "openssl/ssl.h"
 #include "openssl/x509v3.h"
 
@@ -43,9 +42,7 @@ using SSLContextPtr = CSmartPtr<SSL_CTX, SSL_CTX_free>;
 
 class TestSPIFFEValidator : public testing::Test {
 public:
-  TestSPIFFEValidator()
-      : stats_(generateSslStats(*store_.rootScope())) {
-  }
+  TestSPIFFEValidator() : stats_(generateSslStats(*store_.rootScope())) {}
 
   void initialize(std::string yaml, TimeSource& time_source) {
     envoy::config::core::v3::TypedExtensionConfig typed_conf;
@@ -74,14 +71,20 @@ public:
   std::string escapeJson(const std::string& input) {
     std::ostringstream ss;
     for (char c : input) {
-        switch (c) {
-            case '\\': ss << "\\\\"; break;
-            case '"': ss << "\\\""; break;
-            default: ss << c; break;
-        }
+      switch (c) {
+      case '\\':
+        ss << "\\\\";
+        break;
+      case '"':
+        ss << "\\\"";
+        break;
+      default:
+        ss << c;
+        break;
+      }
     }
     return ss.str();
-}
+  }
 
   void initialize(std::string yaml) {
     envoy::config::core::v3::TypedExtensionConfig typed_conf;
@@ -92,10 +95,13 @@ public:
     EXPECT_CALL(factory_context_.dispatcher_, createFilesystemWatcher_())
         .WillRepeatedly(testing::Invoke([] {
           Filesystem::MockWatcher* mock_watcher = new NiceMock<Filesystem::MockWatcher>();
-            EXPECT_CALL(*mock_watcher, addWatch(TestEnvironment::substitute(
-                  "{{ test_rundir }}/test/common/tls/test_data/trust_bundles.json"), _, _))
-                .WillRepeatedly(testing::Return(absl::OkStatus()));
-            return mock_watcher;
+          EXPECT_CALL(
+              *mock_watcher,
+              addWatch(TestEnvironment::substitute(
+                           "{{ test_rundir }}/test/common/tls/test_data/trust_bundles.json"),
+                       _, _))
+              .WillRepeatedly(testing::Return(absl::OkStatus()));
+          return mock_watcher;
         }));
 
     validator_ = std::make_unique<SPIFFEValidator>(config_.get(), stats_, factory_context_);
@@ -768,8 +774,10 @@ typed_config:
 }
 
 TEST_F(TestSPIFFEValidator, TestDoVerifyCertChainMultipleTrustDomainBundleMappingInline) {
-  auto trust_bundle_path = TestEnvironment::substitute("{{ test_rundir }}/test/common/tls/test_data/trust_bundles.json");
-  auto trust_bundle_str = escapeJson(compactJson(TestEnvironment::readFileToStringForTest(trust_bundle_path)));
+  auto trust_bundle_path =
+      TestEnvironment::substitute("{{ test_rundir }}/test/common/tls/test_data/trust_bundles.json");
+  auto trust_bundle_str =
+      escapeJson(compactJson(TestEnvironment::readFileToStringForTest(trust_bundle_path)));
 
   auto config_str = fmt::format(R"EOF(
 name: envoy.tls.cert_validator.spiffe
@@ -777,7 +785,8 @@ typed_config:
   "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.SPIFFECertValidatorConfig
   trust_bundles:
     inline_string: "{}"
-  )EOF", trust_bundle_str);
+  )EOF",
+                                trust_bundle_str);
   std::cerr << "YAML Configuration:\n" << config_str << std::endl; // Print for inspection
 
   initialize(config_str);
