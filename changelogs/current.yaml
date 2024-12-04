@@ -297,6 +297,13 @@ new_features:
   change: |
     Added :ref:`attribute <arch_overview_attributes>` ``upstream.cx_pool_ready_duration``
     to get the duration from when the upstream request was created to when the upstream connection pool is ready.
+- area: http_inspector
+  change: |
+    Added a knob ``initial_read_buffer_size`` in HttpInspector. Previously, a static buffer of 8KiB was inspected,
+    and anything larger (e.g. a request with >8KiB of params) would cause the listener filter to hang.  Now, HttpInspector
+    that will be immediately requested by the filter, and if the HTTP version cannot be identified with that, it will
+    iteratively double up to 64KiB. If more than 64KiB needs to be buffered to determine the HTTP version,
+    then the connection will be closed.
 
 deprecated:
 - area: rbac
