@@ -299,8 +299,17 @@ public:
    * Move all drain trackers and charges from the current slice to the destination slice.
    */
   void transferDrainTrackersTo(Slice& destination) {
-    destination.drain_trackers_.splice(destination.drain_trackers_.end(), drain_trackers_);
-    ASSERT(drain_trackers_.empty());
+    if (drain_trackers_ != nullptr) {
+      if (destination.drain_trackers_ == nullptr) {
+        destination.drain_trackers_ = std::move(drain_trackers_);
+      } else {
+        destination.drain_trackers_->insert(destination.drain_trackers_->end(),
+                                            std::make_move_iterator(drain_trackers_->begin()),
+                                            std::make_move_iterator(drain_trackers_->end()));
+        drain_trackers_.reset();
+      }
+    }
+    ASSERT(drain_trackers_ == nullptr || drain_trackers_->empty());
     // The releasor needn't to be transferred, and actually if there is releasor, this
     // slice can't coalesce. Then there won't be a chance to calling this method.
     ASSERT(fragment_releasor_ == nullptr);
@@ -310,7 +319,10 @@ public:
    * Add a drain tracker to the slice.
    */
   void addDrainTracker(std::function<void()> drain_tracker) {
-    drain_trackers_.emplace_back(std::move(drain_tracker));
+    if (drain_trackers_ == nullptr) {
+      drain_trackers_ = std::make_unique<std::vector<std::function<void()>>>();
+    }
+    drain_trackers_->emplace_back(std::move(drain_tracker));
   }
 
   /**
@@ -318,10 +330,12 @@ public:
    * the drain tracker list.
    */
   void callAndClearDrainTrackersAndCharges() {
-    for (const auto& drain_tracker : drain_trackers_) {
-      drain_tracker();
+    if (drain_trackers_ != nullptr) {
+      for (const auto& drain_tracker : *drain_trackers_) {
+        drain_tracker();
+      }
+      drain_trackers_.reset();
     }
-    drain_trackers_.clear();
 
     if (account_) {
       account_->credit(capacity_);
@@ -389,7 +403,7 @@ protected:
   uint64_t reservable_ = 0;
 
   /** Hooks to execute when the slice is destroyed. */
-  std::list<std::function<void()>> drain_trackers_;
+  std::unique_ptr<std::vector<std::function<void()>>> drain_trackers_;
 
   /** Account associated with this slice. This may be null. When
    * coalescing with another slice, we do not transfer over their account. */

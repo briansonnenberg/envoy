@@ -558,4 +558,128 @@ BENCHMARK(bufferAddVsAddFragments)
     ->Args({1, 1, 64, 5})
     ->Args({1, 1, 4096, 5});
 
+// 1. Measure registration cost (creating buffer and adding drain trackers).
+static void bufferDrainTrackerRegister(benchmark::State& state) {
+  const uint64_t tracker_count = state.range(0);
+  uint64_t counter = 0;
+  const std::string page_data(4096, 'a');
+
+  // Pre-seed TCMalloc thread caches
+  for (int i = 0; i < 1000; ++i) {
+    Buffer::OwnedImpl warmup_buf;
+    warmup_buf.add(page_data);
+    for (uint64_t k = 0; k < tracker_count; ++k) {
+      warmup_buf.addDrainTracker([&counter]() { counter++; });
+    }
+  }
+
+  for (auto _ : state) {
+    UNREFERENCED_PARAMETER(_);
+    Buffer::OwnedImpl buffer;
+    buffer.add(page_data);
+    for (uint64_t i = 0; i < tracker_count; ++i) {
+      buffer.addDrainTracker([&counter]() { counter++; });
+    }
+    benchmark::DoNotOptimize(buffer);
+  }
+  benchmark::DoNotOptimize(counter);
+}
+BENCHMARK(bufferDrainTrackerRegister)->Arg(0)->Arg(1)->Arg(5)->Arg(20);
+
+// 2. Measure drain & execution cost (draining pre-populated buffers).
+static void bufferDrainTrackerDrain(benchmark::State& state) {
+  const uint64_t tracker_count = state.range(0);
+  uint64_t counter = 0;
+  const std::string page_data(4096, 'a');
+
+  // Pre-seed TCMalloc thread caches
+  for (int i = 0; i < 1000; ++i) {
+    Buffer::OwnedImpl warmup_buf;
+    warmup_buf.add(page_data);
+    for (uint64_t k = 0; k < tracker_count; ++k) {
+      warmup_buf.addDrainTracker([&counter]() { counter++; });
+    }
+    warmup_buf.drain(warmup_buf.length());
+  }
+
+  for (auto _ : state) {
+    state.PauseTiming();
+    Buffer::OwnedImpl buffer;
+    buffer.add(page_data);
+    for (uint64_t i = 0; i < tracker_count; ++i) {
+      buffer.addDrainTracker([&counter]() { counter++; });
+    }
+    state.ResumeTiming();
+
+    buffer.drain(buffer.length()); // Timed: execution of callbacks + slice release
+  }
+  benchmark::DoNotOptimize(counter);
+}
+BENCHMARK(bufferDrainTrackerDrain)->Arg(0)->Arg(1)->Arg(5)->Arg(20);
+
+// 3. Measure full lifecycle (registration + execution + cleanup).
+static void bufferDrainTrackerFull(benchmark::State& state) {
+  const uint64_t tracker_count = state.range(0);
+  uint64_t counter = 0;
+  const std::string page_data(4096, 'a');
+
+  // Pre-seed TCMalloc thread caches (small tracker nodes + 4KB slice pages)
+  for (int i = 0; i < 1000; ++i) {
+    Buffer::OwnedImpl warmup_buf;
+    warmup_buf.add(page_data);
+    for (uint64_t k = 0; k < tracker_count; ++k) {
+      warmup_buf.addDrainTracker([&counter]() { counter++; });
+    }
+    warmup_buf.drain(warmup_buf.length());
+  }
+
+  for (auto _ : state) {
+    UNREFERENCED_PARAMETER(_);
+    Buffer::OwnedImpl buffer;
+    buffer.add(page_data);
+    for (uint64_t i = 0; i < tracker_count; ++i) {
+      buffer.addDrainTracker([&counter]() { counter++; });
+    }
+    buffer.drain(buffer.length());
+  }
+  benchmark::DoNotOptimize(counter);
+}
+BENCHMARK(bufferDrainTrackerFull)->Arg(0)->Arg(1)->Arg(5)->Arg(20);
+
+// Measure performance of transferring/coalescing drain trackers between buffers.
+static void bufferDrainTrackerTransfer(benchmark::State& state) {
+  const uint64_t tracker_count = state.range(0);
+  uint64_t counter = 0;
+  const std::string page_data(4096, 'a');
+
+  // Pre-seed TCMalloc thread caches (small tracker nodes + 4KB slice pages)
+  for (int i = 0; i < 1000; ++i) {
+    Buffer::OwnedImpl warmup_src, warmup_dst;
+    warmup_src.add(page_data);
+    warmup_dst.add(page_data);
+    for (uint64_t k = 0; k < tracker_count; ++k) {
+      warmup_src.addDrainTracker([&counter]() { counter++; });
+      warmup_dst.addDrainTracker([&counter]() { counter++; });
+    }
+    warmup_dst.move(warmup_src);
+    warmup_dst.drain(warmup_dst.length());
+  }
+
+  for (auto _ : state) {
+    UNREFERENCED_PARAMETER(_);
+    Buffer::OwnedImpl src;
+    Buffer::OwnedImpl dst;
+    src.add(page_data);
+    dst.add(page_data);
+    for (uint64_t i = 0; i < tracker_count; ++i) {
+      src.addDrainTracker([&counter]() { counter++; });
+      dst.addDrainTracker([&counter]() { counter++; });
+    }
+    dst.move(src); // Triggers slice coalescing and transferDrainTrackersTo
+    dst.drain(dst.length());
+  }
+  benchmark::DoNotOptimize(counter);
+}
+BENCHMARK(bufferDrainTrackerTransfer)->Arg(0)->Arg(1)->Arg(5)->Arg(20)->Arg(1000);
+
 } // namespace Envoy
