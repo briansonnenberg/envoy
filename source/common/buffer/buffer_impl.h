@@ -92,7 +92,7 @@ public:
       : capacity_(fragment.size()), storage_(nullptr),
         base_(static_cast<uint8_t*>(const_cast<void*>(fragment.data()))),
         reservable_(fragment.size()) {
-    releasor_ = [&fragment]() { fragment.done(); };
+    fragment_releasor_ = &fragment;
   }
 
   Slice(Slice&& rhs) noexcept {
@@ -103,7 +103,8 @@ public:
     reservable_ = rhs.reservable_;
     drain_trackers_ = std::move(rhs.drain_trackers_);
     account_ = std::move(rhs.account_);
-    releasor_.swap(rhs.releasor_);
+    fragment_releasor_ = rhs.fragment_releasor_;
+    rhs.fragment_releasor_ = nullptr;
 
     rhs.capacity_ = 0;
     rhs.base_ = nullptr;
@@ -122,11 +123,11 @@ public:
       reservable_ = rhs.reservable_;
       drain_trackers_ = std::move(rhs.drain_trackers_);
       account_ = std::move(rhs.account_);
-      if (releasor_) {
-        releasor_();
+      if (fragment_releasor_ != nullptr) {
+        fragment_releasor_->done();
       }
-      releasor_ = rhs.releasor_;
-      rhs.releasor_ = nullptr;
+      fragment_releasor_ = rhs.fragment_releasor_;
+      rhs.fragment_releasor_ = nullptr;
 
       rhs.capacity_ = 0;
       rhs.base_ = nullptr;
@@ -139,8 +140,8 @@ public:
 
   ~Slice() {
     callAndClearDrainTrackersAndCharges();
-    if (releasor_) {
-      releasor_();
+    if (fragment_releasor_ != nullptr) {
+      fragment_releasor_->done();
     }
   }
 
@@ -302,7 +303,7 @@ public:
     ASSERT(drain_trackers_.empty());
     // The releasor needn't to be transferred, and actually if there is releasor, this
     // slice can't coalesce. Then there won't be a chance to calling this method.
-    ASSERT(releasor_ == nullptr);
+    ASSERT(fragment_releasor_ == nullptr);
   }
 
   /**
@@ -395,7 +396,7 @@ protected:
   BufferMemoryAccountSharedPtr account_;
 
   /** The releasor for the BufferFragment */
-  std::function<void()> releasor_;
+  BufferFragment* fragment_releasor_{nullptr};
 };
 
 class OwnedImpl;
